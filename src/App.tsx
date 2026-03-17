@@ -207,9 +207,17 @@ export default function App() {
     }
   };
 
+  const getApiKey = () => {
+    return process.env.GEMINI_API_KEY || 
+           (process.env as any).API_KEY || 
+           (import.meta as any).env?.VITE_GEMINI_API_KEY || 
+           (import.meta as any).env?.VITE_API_KEY || 
+           '';
+  };
+
   useEffect(() => {
     const checkKey = async () => {
-      const key = process.env.GEMINI_API_KEY || (process.env as any).API_KEY;
+      const key = getApiKey();
       if (!key) {
         if ((window as any).aistudio?.hasSelectedApiKey) {
           const hasKey = await (window as any).aistudio.hasSelectedApiKey();
@@ -244,7 +252,7 @@ export default function App() {
 
     const attemptTTS = async (retryCount = 0): Promise<string | undefined> => {
       try {
-        const apiKey = process.env.GEMINI_API_KEY || (process.env as any).API_KEY || '';
+        const apiKey = getApiKey();
         const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash-preview-tts",
@@ -516,7 +524,7 @@ export default function App() {
   };
 
   const handleSend = async (voiceData?: string, isRetry = false) => {
-    const apiKey = process.env.GEMINI_API_KEY || (process.env as any).API_KEY;
+    const apiKey = getApiKey();
     if (!apiKey) {
       setMessages(prev => [...prev, { 
         role: 'model', 
@@ -559,7 +567,7 @@ export default function App() {
 
     const attemptGeneration = async (retryCount = 0): Promise<any> => {
       try {
-        const apiKey = process.env.GEMINI_API_KEY || (process.env as any).API_KEY || '';
+        const apiKey = getApiKey();
         const ai = new GoogleGenAI({ apiKey });
         const model = "gemini-3-flash-preview";
         
