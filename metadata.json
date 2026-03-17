@@ -1,0 +1,5 @@
+{
+  "name": "EAI - Emotional AI",
+  "description": "An empathetic AI companion with dynamic moods and a soft, pink-themed aesthetic.",
+  "requestFramePermissions": ["microphone"]
+}
