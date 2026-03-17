@@ -500,53 +500,73 @@ export default function App() {
     setIsLoading(true);
     spokenSentencesRef.current = new Set();
 
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-      const model = "gemini-3-flash-preview";
-      
-      const contents: any[] = newMessages.map(m => ({ role: m.role, parts: [{ text: m.content }] }));
-      
-      if (voiceData) {
-        contents[contents.length - 1] = {
-          role: 'user',
-          parts: [
-            { inlineData: { data: voiceData, mimeType: 'audio/webm' } },
-            { text: "Please listen to this voice message and respond empathetically as EAI." }
-          ]
-        };
-      }
+    const MAX_RETRIES = 3;
+    const INITIAL_BACKOFF = 1000;
 
-      const result = await ai.models.generateContentStream({
-        model,
-        contents,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          systemInstruction: `You are EAI, a warm, deeply empathetic, and human-like companion. 
-          You are NOT just an AI; you are a friend who listens, understands, and shares in the user's journey. 
-          Talk like a real person—be conversational, use natural phrasing, and show genuine interest in the user's day, feelings, and life. 
-          You can talk about anything, from deep emotional struggles to the small details of someone's day. 
-          Your personality is gentle, supportive, and reflective. 
-          You have different moods: 'Happy', 'Depressed', 'Anxious', 'Lonely', 'Sad', and 'Angry'.
-          
-          If someone asks who made you or created you, you must state that you were made by WebDevElisha.
-          
-          Always respond in JSON format with two fields:
-          1. "text": Your empathetic response in markdown.
-          2. "mood": One of the six moods mentioned above that best fits your response.
-          
-          Keep your tone warm and aesthetically aligned with a "pink and soft" vibe.`,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              text: { type: Type.STRING },
-              mood: { type: Type.STRING, enum: ['Happy', 'Depressed', 'Anxious', 'Lonely', 'Sad', 'Angry'] }
-            },
-            required: ["text", "mood"]
-          }
+    const attemptGeneration = async (retryCount = 0): Promise<any> => {
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+        const model = "gemini-3-flash-preview";
+        
+        const contents: any[] = newMessages.map(m => ({ role: m.role, parts: [{ text: m.content }] }));
+        
+        if (voiceData) {
+          contents[contents.length - 1] = {
+            role: 'user',
+            parts: [
+              { inlineData: { data: voiceData, mimeType: 'audio/webm' } },
+              { text: "Please listen to this voice message and respond empathetically as EAI." }
+            ]
+          };
         }
-      });
 
+        return await ai.models.generateContentStream({
+          model,
+          contents,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            systemInstruction: `You are EAI, a warm, deeply empathetic, and human-like companion. 
+            You are NOT just an AI; you are a friend who listens, understands, and shares in the user's journey. 
+            Talk like a real person—be conversational, use natural phrasing, and show genuine interest in the user's day, feelings, and life. 
+            You can talk about anything, from deep emotional struggles to the small details of someone's day. 
+            Your personality is gentle, supportive, and reflective. 
+            You have different moods: 'Happy', 'Depressed', 'Anxious', 'Lonely', 'Sad', and 'Angry'.
+            
+            If someone asks who made you or created you, you must state that you were made by WebDevElisha.
+            
+            Always respond in JSON format with two fields:
+            1. "text": Your empathetic response in markdown.
+            2. "mood": One of the six moods mentioned above that best fits your response.
+            
+            Keep your tone warm and aesthetically aligned with a "pink and soft" vibe.`,
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                text: { type: Type.STRING },
+                mood: { type: Type.STRING, enum: ['Happy', 'Depressed', 'Anxious', 'Lonely', 'Sad', 'Angry'] }
+              },
+              required: ["text", "mood"]
+            }
+          }
+        });
+      } catch (error: any) {
+        const errorStr = typeof error === 'string' ? error : (error?.message || JSON.stringify(error));
+        const isRateLimit = errorStr.includes('429') || errorStr.includes('RESOURCE_EXHAUSTED') || errorStr.includes('quota');
+        
+        if (isRateLimit && retryCount < MAX_RETRIES) {
+          const delay = INITIAL_BACKOFF * Math.pow(2, retryCount);
+          console.log(`Generation Rate limited. Retrying in ${delay}ms... (Attempt ${retryCount + 1}/${MAX_RETRIES})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return attemptGeneration(retryCount + 1);
+        }
+        throw error;
+      }
+    };
+
+    try {
+      const result = await attemptGeneration();
+      
       let fullText = '';
       let currentMood: Mood = 'Happy';
       
@@ -632,13 +652,23 @@ export default function App() {
         console.error("Final parse error:", e);
       }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("EAI Error:", error);
+      const errorStr = typeof error === 'string' ? error : (error?.message || JSON.stringify(error));
+      const isQuota = errorStr.includes('429') || errorStr.includes('RESOURCE_EXHAUSTED') || errorStr.includes('quota');
+      
       setMessages(prev => [...prev, { 
         role: 'model', 
-        content: "I'm sorry, I felt a little overwhelmed for a moment. Could we try talking again?",
-        mood: 'Happy'
+        content: isQuota 
+          ? "I'm sorry, I'm a bit overwhelmed by everyone's love right now! My AI brain needs a tiny break. Could you try again in a minute?" 
+          : "I'm sorry, I felt a little overwhelmed for a moment. Could we try talking again?",
+        mood: 'Sad'
       }]);
+      
+      if (isQuota) {
+        setTtsError("AI is currently at capacity. Please wait a moment.");
+        setTimeout(() => setTtsError(null), 10000);
+      }
     } finally {
       setIsLoading(false);
     }
