@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, Type, GenerateContentResponse, Modality, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, Type, GenerateContentResponse, Modality, ThinkingLevel, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Heart, Sparkles, MessageCircle, RefreshCw, Smile, Moon, Sun, Coffee, Mic, MicOff, Volume2, VolumeX, Frown, Flame } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -17,6 +17,7 @@ interface Message {
   role: 'user' | 'model';
   content: string;
   mood?: Mood;
+  isError?: boolean;
 }
 
 const MOOD_CONFIG: Record<Mood, { bg: string, accent: string, icon: React.ReactNode, label: string, btnClass: string }> = {
@@ -138,6 +139,7 @@ export default function App() {
   const [hasDetectedSpeech, setHasDetectedSpeech] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const ccEndRef = useRef<HTMLDivElement>(null);
+  const lastRequestRef = useRef<{ text?: string, voice?: string } | null>(null);
   const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const spokenSentencesRef = useRef<Set<string>>(new Set());
   const lastVoiceTimeRef = useRef<number>(Date.now());
@@ -203,6 +205,13 @@ export default function App() {
       speakText(initialMsg, mood);
     }
   };
+
+  useEffect(() => {
+    if (!process.env.GEMINI_API_KEY) {
+      console.error("GEMINI_API_KEY is missing!");
+      setTtsError("I can't connect to my brain right now (Missing API Key). Please check your settings!");
+    }
+  }, []);
 
   const speakText = (text: string, mood: Mood, clearQueue = true) => {
     if (clearQueue) {
@@ -484,19 +493,40 @@ export default function App() {
     setIsRecording(false);
   };
 
-  const handleSend = async (voiceData?: string) => {
-    if (!input.trim() && !voiceData || isLoading) return;
-
-    const userMessage = input.trim();
-    setInput('');
-    
-    const newMessages: Message[] = [...messages];
-    if (userMessage) {
-      newMessages.push({ role: 'user', content: userMessage });
-    } else if (voiceData) {
-      newMessages.push({ role: 'user', content: "(Voice Message)" });
+  const handleSend = async (voiceData?: string, isRetry = false) => {
+    if (!process.env.GEMINI_API_KEY) {
+      setMessages(prev => [...prev, { 
+        role: 'model', 
+        content: "I'm sorry, but I'm missing my connection to the AI world (API Key). Please make sure it's set up in the environment!",
+        mood: 'Anxious'
+      }]);
+      return;
     }
-    setMessages(newMessages);
+
+    const userMessage = isRetry ? lastRequestRef.current?.text : input.trim();
+    const currentVoiceData = isRetry ? lastRequestRef.current?.voice : voiceData;
+
+    if (!userMessage && !currentVoiceData || isLoading) return;
+
+    if (!isRetry) {
+      lastRequestRef.current = { text: userMessage || undefined, voice: voiceData };
+    }
+
+    let newMessages: Message[] = [...messages];
+    if (isRetry && newMessages.length > 0 && newMessages[newMessages.length - 1].isError) {
+      newMessages.pop();
+    }
+
+    if (!isRetry) {
+      if (userMessage) {
+        newMessages.push({ role: 'user', content: userMessage });
+      } else if (voiceData) {
+        newMessages.push({ role: 'user', content: "(Voice Message)" });
+      }
+      setMessages(newMessages);
+      setInput('');
+    }
+    
     setIsLoading(true);
     spokenSentencesRef.current = new Set();
 
@@ -510,11 +540,11 @@ export default function App() {
         
         const contents: any[] = newMessages.map(m => ({ role: m.role, parts: [{ text: m.content }] }));
         
-        if (voiceData) {
+        if (currentVoiceData) {
           contents[contents.length - 1] = {
             role: 'user',
             parts: [
-              { inlineData: { data: voiceData, mimeType: 'audio/webm' } },
+              { inlineData: { data: currentVoiceData, mimeType: 'audio/webm' } },
               { text: "Please listen to this voice message and respond empathetically as EAI." }
             ]
           };
@@ -547,7 +577,14 @@ export default function App() {
                 mood: { type: Type.STRING, enum: ['Happy', 'Depressed', 'Anxious', 'Lonely', 'Sad', 'Angry'] }
               },
               required: ["text", "mood"]
-            }
+            },
+            safetySettings: [
+              { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+              { category: HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY, threshold: HarmBlockThreshold.BLOCK_NONE },
+            ]
           }
         });
       } catch (error: any) {
@@ -578,11 +615,15 @@ export default function App() {
           try {
             fullText += text;
             
-            const textMatch = fullText.match(/"text":\s*"([^"]*)"/);
+            const textMatch = fullText.match(/"text":\s*"((?:[^"\\]|\\.)*)"/);
             const moodMatch = fullText.match(/"mood":\s*"([^"]*)"/);
             
             if (textMatch && textMatch[1]) {
-              const streamedContent = textMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+              const streamedContent = textMatch[1]
+                .replace(/\\n/g, '\n')
+                .replace(/\\"/g, '"')
+                .replace(/\\'/g, "'")
+                .replace(/\\\\/g, '\\');
               
               // Detect sentences for early speech in voice mode
               if (view === 'voice' && isVoiceEnabled) {
@@ -618,7 +659,13 @@ export default function App() {
 
       // Final parse to ensure everything is correct and catch the last sentence
       try {
-        const data = JSON.parse(fullText);
+        // Clean up markdown code blocks if present
+        let cleanText = fullText.trim();
+        if (cleanText.startsWith('```')) {
+          cleanText = cleanText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+        }
+        
+        const data = JSON.parse(cleanText);
         const aiMood = (data.mood as Mood) || 'Happy';
         const aiContent = data.text || "I'm here for you.";
         
@@ -653,16 +700,29 @@ export default function App() {
       }
 
     } catch (error: any) {
-      console.error("EAI Error:", error);
+      console.error("EAI Error Details:", error);
       const errorStr = typeof error === 'string' ? error : (error?.message || JSON.stringify(error));
       const isQuota = errorStr.includes('429') || errorStr.includes('RESOURCE_EXHAUSTED') || errorStr.includes('quota');
+      const isSafety = errorStr.includes('SAFETY') || errorStr.includes('blocked') || errorStr.includes('finishReason: SAFETY');
       
+      let errorMessage = "I'm sorry, I got a little lost in my thoughts for a second. Could you try saying that again? I'm all ears now!";
+      let errorMood: Mood = 'Sad';
+
+      if (isQuota) {
+        errorMessage = "I'm sorry, I'm a bit overwhelmed by everyone's love right now! My AI brain needs a tiny break. Could you try again in a minute?";
+      } else if (isSafety) {
+        errorMessage = "I'm sorry, I'm not quite sure how to talk about that yet. Could we try a different topic? I'm here to listen to whatever else is on your mind.";
+        errorMood = 'Anxious';
+      } else if (errorStr.includes('API_KEY_INVALID') || errorStr.includes('API key not valid')) {
+        errorMessage = "It seems there's an issue with my API key. Please check the configuration!";
+        errorMood = 'Anxious';
+      }
+
       setMessages(prev => [...prev, { 
         role: 'model', 
-        content: isQuota 
-          ? "I'm sorry, I'm a bit overwhelmed by everyone's love right now! My AI brain needs a tiny break. Could you try again in a minute?" 
-          : "I'm sorry, I felt a little overwhelmed for a moment. Could we try talking again?",
-        mood: 'Sad'
+        content: errorMessage,
+        mood: errorMood,
+        isError: true
       }]);
       
       if (isQuota) {
@@ -909,6 +969,15 @@ export default function App() {
                           {msg.role === 'model' && idx === messages.slice(-3).length - 1 ? (
                             <div className="flex flex-col gap-2">
                               <Typewriter text={msg.content} speed={15} />
+                              {msg.isError && (
+                                <button 
+                                  onClick={() => handleSend(undefined, true)}
+                                  className="mt-2 py-1.5 px-4 bg-rose-50/50 text-rose-600 rounded-full text-[10px] font-bold uppercase tracking-widest hover:bg-rose-100 transition-colors flex items-center justify-center gap-2 mx-auto"
+                                >
+                                  <RefreshCw className="w-3 h-3" />
+                                  Retry
+                                </button>
+                              )}
                             </div>
                           ) : (
                             <ReactMarkdown>{msg.content}</ReactMarkdown>
@@ -1114,7 +1183,18 @@ export default function App() {
                   )}>
                     <div className="markdown-body text-sm md:text-base">
                       {msg.role === 'model' && idx === messages.length - 1 ? (
-                        <Typewriter text={msg.content} speed={10} />
+                        <div className="flex flex-col gap-3">
+                          <Typewriter text={msg.content} speed={10} />
+                          {msg.isError && (
+                            <button 
+                              onClick={() => handleSend(undefined, true)}
+                              className="w-full py-2.5 bg-rose-50 text-rose-600 rounded-2xl text-[10px] font-bold uppercase tracking-widest hover:bg-rose-100 transition-colors flex items-center justify-center gap-2 border border-rose-100"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              Try Again
+                            </button>
+                          )}
+                        </div>
                       ) : (
                         <ReactMarkdown>{msg.content}</ReactMarkdown>
                       )}
