@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI, Type, GenerateContentResponse, Modality, ThinkingLevel, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Heart, Sparkles, MessageCircle, RefreshCw, Smile, Moon, Sun, Coffee, Mic, MicOff, Volume2, VolumeX, Frown, Flame } from 'lucide-react';
+import { Send, Heart, Sparkles, MessageCircle, RefreshCw, Smile, Moon, Sun, Coffee, Mic, MicOff, Volume2, VolumeX, Frown, Flame, Key } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -137,6 +137,7 @@ export default function App() {
   const [isProcessingQueue, setIsProcessingQueue] = useState(false);
   const [currentlySpeakingText, setCurrentlySpeakingText] = useState('');
   const [hasDetectedSpeech, setHasDetectedSpeech] = useState(false);
+  const [isApiKeyMissing, setIsApiKeyMissing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const ccEndRef = useRef<HTMLDivElement>(null);
   const lastRequestRef = useRef<{ text?: string, voice?: string } | null>(null);
@@ -207,11 +208,31 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (!process.env.GEMINI_API_KEY) {
-      console.error("GEMINI_API_KEY is missing!");
-      setTtsError("I can't connect to my brain right now (Missing API Key). Please check your settings!");
-    }
+    const checkKey = async () => {
+      const key = process.env.GEMINI_API_KEY || (process.env as any).API_KEY;
+      if (!key) {
+        if ((window as any).aistudio?.hasSelectedApiKey) {
+          const hasKey = await (window as any).aistudio.hasSelectedApiKey();
+          setIsApiKeyMissing(!hasKey);
+        } else {
+          setIsApiKeyMissing(true);
+        }
+      } else {
+        setIsApiKeyMissing(false);
+      }
+    };
+    checkKey();
   }, []);
+
+  const handleOpenKeyDialog = async () => {
+    if ((window as any).aistudio?.openSelectKey) {
+      await (window as any).aistudio.openSelectKey();
+      setIsApiKeyMissing(false);
+      setTtsError(null);
+    } else {
+      alert("Please set your GEMINI_API_KEY in the environment settings.");
+    }
+  };
 
   const speakText = (text: string, mood: Mood, clearQueue = true) => {
     if (clearQueue) {
@@ -223,7 +244,8 @@ export default function App() {
 
     const attemptTTS = async (retryCount = 0): Promise<string | undefined> => {
       try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+        const apiKey = process.env.GEMINI_API_KEY || (process.env as any).API_KEY || '';
+        const ai = new GoogleGenAI({ apiKey });
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash-preview-tts",
           contents: [{ parts: [{ text: `Speak this at a very fast pace, clearly, in a ${mood.toLowerCase()} and empathetic tone: ${text}` }] }],
@@ -494,12 +516,14 @@ export default function App() {
   };
 
   const handleSend = async (voiceData?: string, isRetry = false) => {
-    if (!process.env.GEMINI_API_KEY) {
+    const apiKey = process.env.GEMINI_API_KEY || (process.env as any).API_KEY;
+    if (!apiKey) {
       setMessages(prev => [...prev, { 
         role: 'model', 
         content: "I'm sorry, but I'm missing my connection to the AI world (API Key). Please make sure it's set up in the environment!",
         mood: 'Anxious'
       }]);
+      setIsApiKeyMissing(true);
       return;
     }
 
@@ -535,7 +559,8 @@ export default function App() {
 
     const attemptGeneration = async (retryCount = 0): Promise<any> => {
       try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+        const apiKey = process.env.GEMINI_API_KEY || (process.env as any).API_KEY || '';
+        const ai = new GoogleGenAI({ apiKey });
         const model = "gemini-3-flash-preview";
         
         const contents: any[] = newMessages.map(m => ({ role: m.role, parts: [{ text: m.content }] }));
@@ -796,6 +821,24 @@ export default function App() {
             </div>
 
             <div className="space-y-4 max-w-sm mx-auto w-full">
+              {isApiKeyMissing && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-6 p-4 bg-rose-50 border border-rose-100 rounded-2xl text-center"
+                >
+                  <p className="text-[10px] font-bold text-rose-600 uppercase tracking-widest mb-3">
+                    AI Connection Required
+                  </p>
+                  <button 
+                    onClick={handleOpenKeyDialog}
+                    className="w-full py-3 bg-rose-500 text-white rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-rose-600 transition-all shadow-lg shadow-rose-200 flex items-center justify-center gap-2"
+                  >
+                    <Key className="w-4 h-4" />
+                    Setup API Key
+                  </button>
+                </motion.div>
+              )}
               <p className="text-center text-slate-500 text-sm mb-6 italic">How are you feeling right now?</p>
               <div className="grid grid-cols-2 gap-3 mb-6">
                 <button 
@@ -904,6 +947,16 @@ export default function App() {
                 <RefreshCw className="w-5 h-5 rotate-[-45deg]" />
               </button>
               <div className="flex items-center gap-2">
+                <button 
+                  onClick={handleOpenKeyDialog}
+                  className={cn(
+                    "w-10 h-10 rounded-xl flex items-center justify-center transition-colors",
+                    isApiKeyMissing ? "bg-rose-100 text-rose-600" : "bg-white/40 backdrop-blur-md text-pink-600 hover:bg-white/60"
+                  )}
+                  title="Setup API Key"
+                >
+                  <Key className="w-5 h-5" />
+                </button>
                 <button 
                   onClick={() => setIsContinuous(!isContinuous)}
                   className={cn(
@@ -1128,6 +1181,16 @@ export default function App() {
               </div>
               
               <div className="flex items-center gap-2">
+                <button 
+                  onClick={handleOpenKeyDialog}
+                  className={cn(
+                    "p-2 rounded-lg transition-colors",
+                    isApiKeyMissing ? "bg-rose-100 text-rose-600" : "bg-pink-50 text-pink-400 hover:bg-pink-100"
+                  )}
+                  title="Setup API Key"
+                >
+                  <Key className="w-5 h-5" />
+                </button>
                 <button
                   onClick={() => setView('voice')}
                   className="p-2 rounded-lg bg-pink-50 text-pink-600 hover:bg-pink-100 transition-colors flex items-center gap-2"
